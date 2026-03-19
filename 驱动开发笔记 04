@@ -1,0 +1,105 @@
+>在前面的学习中，我们一直是通过配置GPIO来直接驱动led的，这样的话每次驱动都需要研究芯片手册，找寄存器，算地址，写配置值。非常的繁琐，于是引入`pinctrl`和`gpio`子系统。
+
+- pinctrl负责配置硬件的`pin`（引脚）驱动，是一次性的初始化工作，它提供了一套“语法”来描述硬件的属性，只需在设备树中使用它的“语法”描述你要配置的硬件的属性和引脚
+- gpio：负责软件层的GPIO控制（输入/输出、读/写）。是驱动运行时要频繁调用的操作。它提供了一系列统一的，标准的函数接口，只需调用它就可以实现对硬件的驱动，而不是去配置寄存器，找地址等等。
+# pinctrl
+>在`rv1126-pinctrl.dtsi`中追加
+## 引脚复用语法
+```c
+rockchip,pins = <PIN_BANK PIN_BANK_IDX MUX &phandle>
+```
+### PIN_BANK
+>PIN所属的组，RV1126中有5个组GPIO0-GPIO4，如果要设置GPIO3_D4这个PIN，那么PIN_BANK就是3
+### PIN_BANK_IDX
+>组内编号，在`/u-boot/include/dt-bindings/pinctrl/rockchip.h`中查看
+
+### MUX
+>设置PIN的复用功能，一个PIN最多有16个复用功能
+
+### phandle
+>描述引脚的通用配置信息
+
+
+------
+# pinctrl
+>在认识pinctrl前先理解几个概念
+
+==pin（引脚）==
+对应Soc的一个物理引脚，是pinctrl管理的最小单元
+==pin group（引脚组）==
+功能相关的一组引脚的集合，实现批量配置，避免单引脚重复操作
+逻辑层面的“group”，可能在一个“bank”，也可能不在
+==function（功能）==
+一个group可以复用的功能模式。一个group可以配置为很多不同的function，比如GPIO，UART，I2C等，每个function有一个或多个group组成。但是一组引脚在同一时间只能实现一个function。一个 Function 只能激活其中的一组引脚。
+==pin state（状态）==
+设备在不同工作场景下对应的引脚配置集合
+常用状态包括：
+- `default/active`：设备正常工作时的引脚配置（默认激活状态）；
+- `sleep`：系统休眠 / 设备断电时的引脚配置（通常设为下拉、高阻态，降低功耗）；
+- `idle`：设备空闲时的低功耗配置。
+如果驱动中没有显式调用 `pinctrl_select_state`，内核在 Probe 阶段通常会自动切换到名为 `default` 的状态。”这就是为什么很多驱动看起来没写 Pinctrl 代码却能正常工作的原因。
+## 工作流程
+- **系统启动/驱动加载 (Probe)**：
+    - 当设备（如 PMIC）被内核识别并开始 `probe` 时，内核会自动触发 Pinctrl 的资源获取。
+- **解析 DTS (Parsing)**：
+    - 核心层读取 `pinctrl-names`。（设备节点的状态引用Consumer）
+    ![[Pasted image 20260312194008.png]]
+    - 按照索引顺序，将 `pinctrl-0` 到 `pinctrl-n` 里的配置包（Phandles）关联起来。
+- **创建状态映射表 (Mapping)**：
+    - 并不是只创建对象，而是建立了一张 **Map (映射表)**。它把“状态名”和“一堆寄存器设定”绑定在一起。
+- **合法性校验 (Verification)**：
+    - 此时会调用 `pinconf_ops`（即 `rockchip_pinconf_pull_valid`）。
+    -![[Pasted image 20260312194704.png]]
+    - 它检查的是硬件能力（例如：你 DTS 写了下拉，但芯片没这个功能，这里就会卡住）。
+- **驱动请求状态切换 (Request)**：
+    - 驱动调用 `pinctrl_select_state(handle, state)`。
+- **配置下发 (Execution)**：
+    - Pinctrl 核心层遍历该 State 下的所有配置包，配置包下定义着引脚配置复用。（引脚配置定义Provider）
+    ![[Pasted image 20260312193848.png]]
+    - **Pin Mux**：通过 `if-else` 或偏移量计算，拨动复用开关（切换 Function）。
+    - **Pin Conf**：配置电压、上下拉、驱动力等。
+    在底层实现中，通常是先 Mux （写功能），后Conf（改电气属性）。如果先改的电器属性，此时引脚如果在 function 互斥的情况下，可能会引发短暂的电流倒灌或信号抖动 
+- **物理生效 (Hardware Access)**：
+    - 驱动最终通过 `readl/writel` 写入物理寄存器，引脚的电信号特征瞬间改变。
+
+
+
+# gpio 子系统
+>同样的，再理解gpio子系统前先了解一些概念
+
+==GPIO BANK（引脚组）==
+硬件层面的一组引脚，共享一组寄存器
+==GPIO Descriptor（描述符）==
+一个具体的引脚对象
+==Direction（方向）==
+- **输入 (Input)**：读取外面的电平（看传感器报警了吗？）。
+- **输出 (Output)**：向外面发信号（让 LED 亮吗？）。
+==Active State（有效电平）==
+- **高有效 (Active High)**：输出 1，引脚出 3.3V；输出 0，引脚出 0V。
+- **低有效 (Active Low)**：输出 1，底层写 0；输出 0，底层写 1。
+
+>在操作GPIO前，要执行一个“握手动作”
+- **Pinctrl 负责“定性”**：把引脚的功能从“未知”或“其他功能”拨到 **GPIO 功能**。
+- **GPIO 负责“定量”**：在确定是 GPIO 的前提下，控制它是 0 还是 1。
+
+## 工作流程
+#### 第一步：资源声明 (DTS 层)
+
+在设备树里告诉内核：谁要用哪里的引脚。
+![[Pasted image 20260312220849.png]]
+
+#### 第二步：获取资源 (Consumer 驱动层)
+驱动程序在 `probe` 函数里申请“许可证”。
+- **动作**：调用 `gpiod_get()`。
+- **内核逻辑**：GPIO 核心层查表，确认该引脚没被别人占用。
+
+#### 第三步：配置方向 (Setup)
+告诉引脚是往外发信号还是往里读信号。
+![[Pasted image 20260312221221.png]]
+- **硬件逻辑**：底层驱动去修改该 Bank 的 **Direction 寄存器**。
+
+#### 第四步：控制电平 (Execution)
+
+![[Pasted image 20260312221425.png]]
+- **底层翻译**：如果你在 DTS 里设了 `Active Low`，你传 1，内核会自动往寄存器写 0。
+- **最终写入**：调用类似 `rockchip_gpio_set` 的函数，通过 `writel` 写入物理寄存器。
