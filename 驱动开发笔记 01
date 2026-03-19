@@ -1,0 +1,137 @@
+## 字符设备驱动挂载
+### 驱动代码的编写
+>首先配置C/C++编辑配置文件
+```json
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "${workspaceFolder}/**",
+	            "/home/pan/RV1126/alientek_sdk/kernel/arch/arm/include",
+                "/home/pan/RV1126/alientek_sdk/kernel/include",
+                "/home/pan/RV1126/alientek_sdk/kernel/arch/arm/include/generated"
+            ],
+
+            "defines": [],
+            "compilerPath": "/usr/bin/gcc",
+            "cStandard": "gnu11",
+            "cppStandard": "gnu++14",
+            "intelliSenseMode": "gcc-x64"
+        }
+    ],
+    "version": 4
+}
+```
+
+>接下来建立一个`.c`文件开始编写驱动程序
+>一个驱动程序要包含以下模块
+
+==入口函数==
+```c
+static int __init xxx_init(void)
+```
+==驱动出口函数==
+```c
+static void __exit xxx_exit(void)
+```
+==加载/卸载函数==
+>当使用“modprobe”命令加载驱动的时候，xxx_init 这个函数就会被调用。module_exit
+>函数用来向 Linux 内核注册一个模块卸载函数，参数 xxx_exit 就是需要注册的具体函数，当使
+>用“rmmod”命令卸载具体驱动的时候 xxx_exit 函数就会被调用。
+```c
+//注册模块加载函数
+module_init(xxx_init);
+//注册模块卸载函数
+module_exit(xxx_exit);
+```
+==字符设备的注册和注销函数==
+```c
+static inline int register_chrdev(unsigned int major,const char* name,const struct file_operations *fops)          //major：要注册的设备对应的主设备号。可以静态分配
+
+static inline void unregister_chrdev(unsigned int major,const char *name)
+```
+==添加 LICENSE 和作者信息==
+```c
+MODULE_LICENSE()     //添加模块 LICENSE 信息
+MODULE_AUTHOR()      //添加模块作者信息
+```
+>我们需要编写一段Makefile文件，通过Makefile进行编译
+```Makefile
+KERNELDIR := /home/pan/RV1126/alientek_sdk/kernel
+
+CURRENT_PATH := $(shell pwd)
+# obj-m 表示将 chrdevbase.c 这个文件编译为 chrdevbase.ko 模块
+obj-m := chrdevbase.o
+
+build: kernel_modules
+
+kernel_modules:
+    $(MAKE) -C $(KERNELDIR) M=$(CURRENT_PATH) modules
+
+clean:
+    $(MAKE) -C $(KERNELDIR) M=$(CURRENT_PATH) clean
+```
+
+>Makefile编写好后输入命令来编译驱动模块
+```bash
+make ARCH=arm 
+```
+>编译完成后会生成一个`.ko`文件，这个文件就是驱动模块
+
+### 测试APP的编写
+>编写完成后需要编写一个测试APP来验证驱动程序
+>直接通过之前安装好的交叉编译器来编译
+```bash
+   /opt/atk-dlrv1126-toolchain/bin/arm-linux-gnueabihf-gcc chrdevbaseApp.c -o chrdevbaseApp
+```
+>查看信息
+```bash
+file chrdevbaseApp
+```
+
+### 在开发板上运行测试
+>使用scp命令通过网络将`.ko`和APP文件传到开发板`/lib/modules/4.19.111` 的目录下
+```bash
+scp chrdevbase.ko chrdevbaseApp root@192.168.3.124:/lib/modules/4.19.111
+```
+
+>使用ssh连接到开发板的终端
+```bash
+ssh root@192.168.3.124
+```
+
+>进入`/lib/modules/4.19.111`目录下查看
+>加载驱动模块
+```bash
+modprobe chrdevbase.ko
+```
+>如何提示找不到，先输入下面的命令手动创建设备节点，再加载
+```bash
+depmod
+```
+
+#### 查看加载情况
+>输入`lsmod`命令查看当前系统中存在的模块
+>输入`cat /proc/devices`命令查看有没有这个设备
+
+#### 创建设备节点文件
+>驱动程序加载成功后需要在/dev目录下创建一个对应的设备节点文件，应用程序通过操作这个节点文件来完成对具体设备的操作
+```bash
+# “/dev/chrdevbase”是要创建的节点文件，“c”表示这是个
+# 字符设备，“200”是设备的主设备号，“0”是设备的次设备号。
+mknod /dev/chrdevbase c 200 0
+```
+
+#### 测试app
+>准备了这么久，终于要开始测试了
+```bash
+./chrdevbashApp /dev/chrdevbase 1
+```
+
+### 卸载驱动模块
+>不再使用某个设备的话可以将其卸载掉
+```bash
+rmmod chrdevbase
+```
+>记得使用`lsmod`或`cat /proc/devices`命令检查一下QwQ
